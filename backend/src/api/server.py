@@ -1,13 +1,14 @@
 import uuid        # Generate unique session IDs
 import logging     # Application logging
 from fastapi import FastAPI, HTTPException  
+from fastapi.middleware.cors import CORSMiddleware
 # ↑ FastAPI = modern web framework (like Flask but faster)
 # ↑ HTTPException = handles errors with proper HTTP status codes
 
 from pydantic import BaseModel  
 # ↑ Pydantic = data validation library (ensures API requests have correct format)
 
-from typing import List, Optional  
+from typing import List, Optional, Dict, Any  
 # ↑ Type hints for better code clarity and auto-completion
 
 
@@ -22,25 +23,34 @@ load_dotenv(override=True)
 #   APPLICATIONINSIGHTS_CONNECTION_STRING=InstrumentationKey=...
 
 
-# ========== STEP 2: INITIALIZE TELEMETRY ==========
-from backend.src.api.telemetry import setup_telemetry
-setup_telemetry()  
-# ☝️ "Activates the sensors" - starts tracking all API activity
-# Must happen AFTER load_dotenv() but BEFORE creating FastAPI app
+# ========== STEP 2: CONFIGURE LOGGING & SILENCE AZURE NOISE ==========
+logging.basicConfig(level=logging.INFO)
+
+for noisy_name in [
+    "azure.core.pipeline.policies.http_logging_policy",
+    "azure.monitor.opentelemetry",
+    "azure.monitor.opentelemetry.exporter",
+    "azure.monitor.opentelemetry.exporter.export._base",
+    "azure.identity",
+    "azure.core",
+    "azure",
+]:
+    _l = logging.getLogger(noisy_name)
+    _l.setLevel(logging.WARNING)
+    _l.propagate = False
+
+logger = logging.getLogger("api-server")
 
 
-# ========== STEP 3: IMPORT WORKFLOW GRAPH ==========
+# ========== STEP 3: INITIALIZE TELEMETRY ==========
+from backend.src.api.telemetry import setup_telemetry, silence_azure_loggers
+setup_telemetry()
+silence_azure_loggers()
+
+
+# ========== STEP 4: IMPORT WORKFLOW GRAPH ==========
 from backend.src.graph.workflow import app as compliance_graph
-# Imports your LangGraph workflow (Indexer → Auditor)
-# Renamed to 'compliance_graph' to avoid confusion with FastAPI's 'app'
 
-
-# ========== STEP 4: CONFIGURE LOGGING ==========
-logging.basicConfig(level=logging.INFO)  
-# Sets default log level (INFO = important events, not debug spam)
-
-logger = logging.getLogger("api-server")  
-# Creates named logger for this module
 
 
 # ========== STEP 5: CREATE FASTAPI APPLICATION ==========
@@ -49,6 +59,14 @@ app = FastAPI(
     title="Brand Guardian AI API",
     description="API for auditing video content against brand compliance rules.",
     version="1.0.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 # FastAPI automatically creates:
 # - Interactive docs at http://localhost:8000/docs
@@ -86,9 +104,10 @@ class ComplianceIssue(BaseModel):
     
     Used inside AuditResponse to represent each violation found.
     """
-    category: str      # Example: "Misleading Claims"
-    severity: str      # Example: "CRITICAL"
-    description: str   # Example: "Absolute guarantee detected at 00:32"
+    category: str                    # Example: "Misleading Claims"
+    severity: str                    # Example: "CRITICAL"
+    description: str                 # Example: "Absolute guarantee detected at 00:32"
+    timestamp: Optional[str] = None  # Example: "00:32" (if localized)
 
 
 # --- RESPONSE MODEL ---
@@ -100,27 +119,16 @@ class AuditResponse(BaseModel):
     1. Validate the response before sending (catches bugs)
     2. Auto-generate API documentation (shows users what to expect)
     3. Provide type hints for frontend developers
-    
-    Example response:
-    {
-        "session_id": "ce6c43bb-c71a-4f16-a377-8b493502fee2",
-        "video_id": "vid_ce6c43bb",
-        "status": "FAIL",
-        "final_report": "Video contains 2 critical violations...",
-        "compliance_results": [
-            {
-                "category": "Misleading Claims",
-                "severity": "CRITICAL",
-                "description": "Absolute guarantee at 00:32"
-            }
-        ]
-    }
     """
-    session_id: str                           # Unique audit session ID
-    video_id: str                             # Shortened video identifier
-    status: str                               # PASS or FAIL
-    final_report: str                         # AI-generated summary
-    compliance_results: List[ComplianceIssue] # List of violations (can be empty)
+    session_id: str                                    # Unique audit session ID
+    video_id: str                                      # Shortened video identifier
+    status: str                                        # PASS or FAIL
+    final_report: str                                  # AI-generated summary
+    compliance_results: List[ComplianceIssue]          # List of violations (can be empty)
+    transcript: Optional[str] = ""                     # Extracted speech-to-text transcript
+    ocr_text: Optional[List[str]] = []                 # List of on-screen OCR texts
+    video_metadata: Optional[Dict[str, Any]] = None    # Video metadata (duration, platform, etc.)
+
 
 
 # ========== STEP 7: DEFINE MAIN ENDPOINT ==========
@@ -185,16 +193,13 @@ async def audit_video(request: AuditRequest):
         # ========== MAP GRAPH OUTPUT TO API RESPONSE ==========
         return AuditResponse(
             session_id=session_id,
-            video_id=final_state.get("video_id"),  
-            # .get() safely retrieves value (None if missing)
-            
+            video_id=final_state.get("video_id", video_id_short),  
             status=final_state.get("final_status", "UNKNOWN"),  
-            # Defaults to "UNKNOWN" if key doesn't exist
-            
             final_report=final_state.get("final_report", "No report generated."),
-            
-            compliance_results=final_state.get("compliance_results", [])
-            # Returns empty list [] if no violations
+            compliance_results=final_state.get("compliance_results", []),
+            transcript=final_state.get("transcript", ""),
+            ocr_text=final_state.get("ocr_text", []),
+            video_metadata=final_state.get("video_metadata")
         )
         # FastAPI automatically converts this Pydantic object to JSON
 

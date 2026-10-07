@@ -11,9 +11,20 @@
 
 ---
 
+<p align="center">
+  <img src="assets/app_working.gif" alt="Brand Guardian AI Live App Working Demo" width="100%" style="border-radius: 12px; border: 1px solid #C9BEFF; box-shadow: 0 8px 30px rgba(99, 103, 255, 0.12);" />
+</p>
+
+<p align="center">
+  <em>Autonomous multimodal video auditing in action: Stream ingestion &rarr; Azure Video Indexer &rarr; Azure AI Search &rarr; GPT-4o compliance reasoning with synchronized jump-to-timestamp playback.</em>
+</p>
+
+---
+
 ## Executive Overview
 
 **Brand Guardian AI** is an enterprise-grade automated multimodal auditing system engineered to assess video marketing content against brand guidelines, regulatory mandates (e.g., **FTC Endorsement Guides**), and platform advertising specifications (e.g., **YouTube Ad Specs**).
+
 
 By combining **Azure Video Indexer** for multimodal signal extraction (speech-to-text transcription and computer vision OCR), **Azure AI Search** for Retrieval-Augmented Generation (RAG) over regulatory rulebooks, and a stateful **LangGraph** orchestration graph powered by **Azure OpenAI (GPT-4o)**, the system performs autonomous, frame-accurate compliance auditing with strict structured JSON output and enterprise-wide distributed tracing.
 
@@ -27,6 +38,24 @@ By combining **Azure Video Indexer** for multimodal signal extraction (speech-to
 - **Deterministic Schema Enforcement**: Enforces structured JSON output (`AuditResponse`, `ComplianceIssue`) with strict categorization (`Claim Validation`, `FTC_DISCLOSURE`, `Platform Specs`) and severity tagging (`CRITICAL`, `WARNING`).
 - **Zero-Friction Observability**: Native integration with **Azure Monitor** and **Application Insights** via OpenTelemetry, tracking HTTP request lifecycles, database latency, and LLM call durations.
 - **Production-Ready REST API**: High-throughput asynchronous API built on **FastAPI**, featuring automatic OpenAPI / Swagger interactive documentation, schema validation, and health checks.
+- **Enterprise Web Interface**: Modern, accessible React + Vite dashboard featuring synchronized video timestamp jumping, live execution console, multimodal tabs, and persistent audit history.
+
+---
+
+## User Interface & Interactive Workspace
+
+Brand Guardian AI includes a high-performance web application designed with a clean, accessible **Moon-Silver & Lavender** visual system (`#6367FF`, `#8494FF`, `#C9BEFF`, `#FFDBFD`) — free from visual clutter, neon glows, or emojis.
+
+| **Home Overview & Architecture Pillars** | **Audit Workspace & Synchronized Player** |
+|:---:|:---:|
+| <img src="assets/home_page.png" alt="Brand Guardian AI - Home Dashboard" width="100%" style="border-radius: 8px; border: 1px solid #C9BEFF;" /> | <img src="assets/audit_page.png" alt="Brand Guardian AI - Audit Workspace" width="100%" style="border-radius: 8px; border: 1px solid #C9BEFF;" /> |
+| *System architecture cards, recent audit history, and 1-click test runs.* | *4-step pipeline stepper, live terminal logs, jump markers, OCR & transcript inspector.* |
+
+### Key Frontend Features
+- **Synchronized Video Player**: Interactive timestamp badges (`00:15`, `00:32`) instantly command the embedded video player to seek directly to offending frames.
+- **Multimodal Evidence Inspector**: Dedicated tabbed inspector displaying frame-by-frame **On-Screen Visual OCR** cards, verbatim **Audio Speech Transcripts**, and raw system payloads.
+- **Live Execution Console**: Real-time terminal output reflecting LangGraph state transitions (`[Node: Indexer]`, `[Node: Auditor]`, vector search queries).
+- **Persistent History & Markdown Reports**: Store previous audit runs locally, reload past verdicts with one click, and export audit reports as downloadable `.md` files.
 
 ---
 
@@ -194,6 +223,28 @@ video-audit-project/
 ├── .python-version                       # Pinned Python version (3.10)
 ├── pyproject.toml                        # Project metadata and package manager manifest
 ├── README.md                             # Comprehensive production documentation
+│
+├── assets/                               # Media documentation assets
+│   ├── app_working.gif                   # Full end-to-end audit demonstration GIF
+│   ├── home_page.png                     # Home overview and pipeline cards screenshot
+│   └── audit_page.png                    # Live audit workspace, video player, and OCR inspector
+│
+├── frontend/                             # Enterprise React + Vite web dashboard
+│   ├── index.html                        # HTML entry point
+│   ├── package.json                      # Frontend dependencies & scripts
+│   ├── vite.config.js                    # Vite configuration with /api reverse proxy
+│   └── src/
+│       ├── App.jsx                       # Root application view & state manager
+│       ├── App.css                       # Moon-silver & lavender design system
+│       ├── components/                   # Modular UI components
+│       │   ├── Navbar.jsx                # Header bar, brand logo, history counter & back button
+│       │   ├── HomeScreen.jsx            # Architecture hero banner, pipeline cards, recent audits
+│       │   ├── AuditWorkspace.jsx        # Stepper, video player, terminal console, multimodal tabs
+│       │   ├── HistoryModal.jsx          # Audit session storage viewer with 1-click reload
+│       │   └── ReportModal.jsx           # Completion report modal with instant markdown download
+│       └── services/
+│           ├── api.js                    # FastAPI client & localStorage history manager
+│           └── reportGenerator.js        # Downloadable compliance markdown exporter
 │
 ├── backend/                              # Core backend microservice
 │   ├── Dockerfile                        # Multi-stage production container definition
@@ -371,6 +422,19 @@ Once running:
 - **ReDoc Documentation**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
 - **Health Check Probe**: [http://localhost:8000/health](http://localhost:8000/health)
 
+### Step 4: Launch the Frontend Web Dashboard
+
+In a second terminal window, start the React + Vite frontend:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Once running:
+- **Web Dashboard**: [http://localhost:5173](http://localhost:5173) (Configured with Vite proxy routing `/api` requests to backend port `8000`)
+
 ---
 
 ## API Reference & Usage Guide
@@ -398,19 +462,32 @@ Once running:
     {
       "category": "FTC_DISCLOSURE",
       "severity": "CRITICAL",
-      "description": "Influencer endorses product without clear and conspicuous verbal or visual disclosure (#ad, #sponsored) in the opening 30 seconds."
+      "description": "Influencer endorses product without clear and conspicuous verbal or visual disclosure (#ad, #sponsored) in the opening 30 seconds.",
+      "timestamp": "00:15"
     },
     {
       "category": "Claim Validation",
       "severity": "CRITICAL",
-      "description": "On-screen text guarantees '100% Guaranteed Return in 7 Days' which violates misleading claim restrictions."
+      "description": "On-screen text guarantees '100% Guaranteed Return in 7 Days' which violates misleading claim restrictions.",
+      "timestamp": "00:32"
     },
     {
       "category": "Platform Specs",
       "severity": "WARNING",
-      "description": "Overlay text overlaps with YouTube mobile UI safe zones."
+      "description": "Overlay text overlaps with YouTube mobile UI safe zones.",
+      "timestamp": "01:05"
     }
-  ]
+  ],
+  "transcript": "Hey guys! Welcome back to my channel. Today I'm so excited to show you this brand new trading tool that gave me a 100% guaranteed return in 7 days...",
+  "ocr_text": [
+    "100% Guaranteed Return in 7 Days",
+    "LIMITED TIME OFFER",
+    "Link in description below"
+  ],
+  "video_metadata": {
+    "duration": 182,
+    "platform": "youtube"
+  }
 }
 ```
 
@@ -421,7 +498,16 @@ Once running:
   "video_id": "vid_b3f021e1",
   "status": "PASS",
   "final_report": "All audio and on-screen claims comply with FTC endorsement regulations and YouTube ad formatting specifications.",
-  "compliance_results": []
+  "compliance_results": [],
+  "transcript": "This video is sponsored by BrandX. Let's dive into our honest review...",
+  "ocr_text": [
+    "#AD | SPONSORED BY BRANDX",
+    "Results may vary. Consult a professional."
+  ],
+  "video_metadata": {
+    "duration": 94,
+    "platform": "youtube"
+  }
 }
 ```
 

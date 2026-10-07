@@ -124,13 +124,35 @@ class VideoIndexerService:
         transcript_lines = []
         for v in vi_json.get("videos", []):
             for insight in v.get("insights", {}).get("transcript", []):
-                transcript_lines.append(insight.get("text"))
+                text = insight.get("text")
+                if text and str(text).strip():
+                    transcript_lines.append(str(text).strip())
         
+        # Fallback to summarizedInsights transcript if empty
+        if not transcript_lines:
+            for insight in vi_json.get("summarizedInsights", {}).get("transcript", []):
+                text = insight.get("text")
+                if text and str(text).strip():
+                    transcript_lines.append(str(text).strip())
+
         ocr_lines = []
         for v in vi_json.get("videos", []):
             for insight in v.get("insights", {}).get("ocr", []):
-                ocr_lines.append(insight.get("text"))
-                
+                text = insight.get("text")
+                if text and str(text).strip():
+                    ocr_lines.append(str(text).strip())
+
+        # Fallback to summarizedInsights ocr if empty
+        if not ocr_lines:
+            for insight in vi_json.get("summarizedInsights", {}).get("ocr", []):
+                text = insight.get("text")
+                if text and str(text).strip():
+                    ocr_lines.append(str(text).strip())
+
+        logger.info(
+            f"Extraction summary: {len(transcript_lines)} transcript segments, {len(ocr_lines)} OCR items found."
+        )
+
         return {
             "transcript": " ".join(transcript_lines),
             "ocr_text": ocr_lines,
