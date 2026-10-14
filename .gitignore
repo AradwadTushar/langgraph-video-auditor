@@ -36,4 +36,7 @@ frontend/dist/
 frontend/.vite/
 .eslintcache
 
+# Agents & AI memory
+.agents/
+
 

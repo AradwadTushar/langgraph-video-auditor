@@ -1,7 +1,9 @@
+import os
 import uuid        # Generate unique session IDs
 import logging     # Application logging
-from fastapi import FastAPI, HTTPException  
+from fastapi import FastAPI, HTTPException, Security, Depends, status  
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader
 # ↑ FastAPI = modern web framework (like Flask but faster)
 # ↑ HTTPException = handles errors with proper HTTP status codes
 
@@ -61,13 +63,38 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# Parse allowed CORS origins from environment
+allowed_origins_raw = os.getenv("ALLOWED_ORIGINS", "*")
+if allowed_origins_raw.strip() == "*":
+    allowed_origins = ["*"]
+else:
+    allowed_origins = [o.strip() for o in allowed_origins_raw.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Optional API Key Authentication Header
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+async def verify_api_key(api_key: Optional[str] = Security(api_key_header)):
+    """
+    Validates optional API key authentication.
+    If BRAND_GUARDIAN_API_KEY is configured in .env, checks the X-API-Key header.
+    If not configured, allows requests for seamless local development and demo access.
+    """
+    configured_key = os.getenv("BRAND_GUARDIAN_API_KEY") or os.getenv("API_KEY")
+    if configured_key:
+        if not api_key or api_key != configured_key:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Unauthorized: Invalid or missing 'X-API-Key' header."
+            )
+    return api_key
 # FastAPI automatically creates:
 # - Interactive docs at http://localhost:8000/docs
 # - OpenAPI schema at http://localhost:8000/openapi.json
@@ -137,7 +164,10 @@ class AuditResponse(BaseModel):
 # ↑ "/audit" = URL path (http://localhost:8000/audit)
 # ↑ response_model = Tells FastAPI to validate response matches AuditResponse
 
-async def audit_video(request: AuditRequest):
+async def audit_video(
+    request: AuditRequest,
+    _auth: Optional[str] = Depends(verify_api_key)
+):
     """
     Main API endpoint that triggers the compliance audit workflow.
     
@@ -152,10 +182,11 @@ async def audit_video(request: AuditRequest):
     Response: AuditResponse object (defined above)
     
     Process:
-    1. Generate unique session ID
-    2. Prepare input for LangGraph workflow
-    3. Invoke the graph (Indexer → Auditor)
-    4. Return formatted results
+    1. Verify optional API Key (if configured)
+    2. Generate unique session ID
+    3. Prepare input for LangGraph workflow
+    4. Asynchronously invoke the graph (Indexer → Auditor) via ainvoke
+    5. Return formatted results
     """
     
     # ========== GENERATE SESSION ID ==========
@@ -168,7 +199,6 @@ async def audit_video(request: AuditRequest):
     
     # ========== LOG INCOMING REQUEST ==========
     logger.info(f"Received Audit Request: {request.video_url} (Session: {session_id})")
-    # Example output: "Received Audit Request: https://youtu.be/abc (Session: ce6c43bb...)"
 
     # ========== PREPARE GRAPH INPUT ==========
     initial_inputs = {
@@ -179,16 +209,9 @@ async def audit_video(request: AuditRequest):
     }
 
     try:
-        # ========== INVOKE LANGGRAPH WORKFLOW ==========
-        # This is the SAME logic from main.py - just wrapped in an API
-        final_state = compliance_graph.invoke(initial_inputs)
-        # ↑ Blocking call - waits for entire workflow to complete
-        # ↑ Flow: START → Indexer → Auditor → END
-        # ↑ Returns: Final state dictionary with all results
-        
-        # NOTE: In production, you'd use:
-        # await compliance_graph.ainvoke(initial_inputs)
-        # ↑ Async version - doesn't block the server while processing
+        # ========== ASYNC INVOKE LANGGRAPH WORKFLOW ==========
+        # Asynchronous execution ensures FastAPI event loop is never blocked
+        final_state = await compliance_graph.ainvoke(initial_inputs)
         
         # ========== MAP GRAPH OUTPUT TO API RESPONSE ==========
         return AuditResponse(

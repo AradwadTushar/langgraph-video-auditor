@@ -1,8 +1,9 @@
 import json
 import os
 import logging
-import re  # <--- Added Regex for cleaning
-from typing import Dict, Any, List
+import re
+from typing import Dict, Any, List, Optional, Literal
+from pydantic import BaseModel, Field
 
 from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
 from langchain_community.vectorstores import AzureSearch
@@ -66,10 +67,52 @@ def index_video_node(state: VideoAuditState) -> Dict[str, Any]:
             "ocr_text": []
         }
 
+# --- Pydantic Schema for Structured Auditor Output ---
+
+class ComplianceItem(BaseModel):
+    category: str = Field(description="Compliance violation category, e.g. 'FTC_DISCLOSURE', 'Misleading Claim', 'Ad Transparency'")
+    severity: Literal["CRITICAL", "WARNING"] = Field(description="Severity rating: CRITICAL or WARNING")
+    description: str = Field(description="Detailed explanation of the specific violation found in transcript or OCR text.")
+    timestamp: Optional[str] = Field(default=None, description="Timestamp or time window where the issue occurs, e.g., '00:15'")
+
+class ComplianceAuditReport(BaseModel):
+    compliance_results: List[ComplianceItem] = Field(default_factory=list, description="List of detected compliance issues.")
+    status: Literal["PASS", "FAIL"] = Field(description="Overall compliance result: 'PASS' if zero violations, 'FAIL' if violations exist.")
+    final_report: str = Field(description="Executive markdown summary of the audit findings, explaining reasoning and evidence.")
+
+def _clean_and_parse_llm_json(raw_content: str) -> Dict[str, Any]:
+    """
+    Safely extracts and parses JSON from LLM response text,
+    handling markdown fences, whitespace, and formatting variations.
+    """
+    cleaned = raw_content.strip()
+    if "```" in cleaned:
+        match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
+        if match:
+            cleaned = match.group(1).strip()
+        else:
+            # Fallback regex if curly braces span differently
+            generic_match = re.search(r"```(?:json)?(.*?)```", cleaned, re.DOTALL)
+            if generic_match:
+                cleaned = generic_match.group(1).strip()
+    
+    # If wrapped in non-markdown but has extra surrounding text, extract outermost JSON object
+    if not cleaned.startswith("{") and "{" in cleaned:
+        start_idx = cleaned.find("{")
+        end_idx = cleaned.rfind("}")
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            cleaned = cleaned[start_idx:end_idx + 1]
+
+    parsed = json.loads(cleaned)
+    # Validate structure using Pydantic
+    validated = ComplianceAuditReport.model_validate(parsed)
+    return validated.model_dump()
+
 # --- NODE 2: THE COMPLIANCE AUDITOR ---
 def audit_content_node(state: VideoAuditState) -> Dict[str, Any]:
     """
-    Performs Retrieval-Augmented Generation (RAG) to audit the content.
+    Performs Retrieval-Augmented Generation (RAG) to audit the content
+    with strict structured output, few-shot calibrated examples, and robust parsing.
     """
     logger.info("--- [Node: Auditor] querying Knowledge Base & LLM ---")
     
@@ -82,81 +125,122 @@ def audit_content_node(state: VideoAuditState) -> Dict[str, Any]:
             "final_report": "Audit skipped because video processing failed (No Transcript)."
         }
 
-    # Initialize Clients
-    llm = AzureChatOpenAI(
-        azure_deployment=os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT"),
-        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-        openai_api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
-    )
-
-    embeddings = AzureOpenAIEmbeddings(
-        azure_deployment=os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small"),
-        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-        openai_api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
-    )
-
-    vector_store = AzureSearch(
-        azure_search_endpoint=os.getenv("AZURE_SEARCH_ENDPOINT"),
-        azure_search_key=os.getenv("AZURE_SEARCH_API_KEY"),
-        index_name=os.getenv("AZURE_SEARCH_INDEX_NAME"),
-        embedding_function=embeddings.embed_query
-    )
-    
-    # RAG Retrieval
-    ocr_text = state.get("ocr_text", [])
-    query_text = f"{transcript} {' '.join(ocr_text)}"
-    docs = vector_store.similarity_search(query_text, k=3)
-    
-    retrieved_rules = "\n\n".join([doc.page_content for doc in docs])
-    
-    # --- UPDATED PROMPT WITH STRICT SCHEMA ---
-    system_prompt = f"""
-    You are a Senior Brand Compliance Auditor.
-    
-    OFFICIAL REGULATORY RULES:
-    {retrieved_rules}
-    
-    INSTRUCTIONS:
-    1. Analyze the Transcript and OCR text below.
-    2. Identify ANY violations of the rules.
-    3. Return strictly JSON in the following format:
-    
-    {{
-        "compliance_results": [
-            {{
-                "category": "Claim Validation",
-                "severity": "CRITICAL",
-                "description": "Explanation of the violation..."
-            }}
-        ],
-        "status": "FAIL", 
-        "final_report": "Summary of findings..."
-    }}
-
-    If no violations are found, set "status" to "PASS" and "compliance_results" to [].
-    """
-
-    user_message = f"""
-    VIDEO METADATA: {state.get('video_metadata', {})}
-    TRANSCRIPT: {transcript}
-    ON-SCREEN TEXT (OCR): {ocr_text}
-    """
+    response = None
 
     try:
+        # Initialize Clients
+        llm = AzureChatOpenAI(
+            azure_deployment=os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT"),
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+            openai_api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
+            temperature=1,
+        )
+
+        embeddings = AzureOpenAIEmbeddings(
+            azure_deployment=os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small"),
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+            openai_api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
+        )
+
+        vector_store = AzureSearch(
+            azure_search_endpoint=os.getenv("AZURE_SEARCH_ENDPOINT"),
+            azure_search_key=os.getenv("AZURE_SEARCH_API_KEY"),
+            index_name=os.getenv("AZURE_SEARCH_INDEX_NAME"),
+            embedding_function=embeddings.embed_query
+        )
+        
+        # RAG Retrieval - Granular query formulation to avoid vector dilution
+        ocr_text = state.get("ocr_text", [])
+        ocr_joined = " ".join(ocr_text) if ocr_text else ""
+        
+        # Build targeted query from salient points
+        if len(transcript) > 600:
+            query_seed = f"{transcript[:400]} {transcript[-200:]} {ocr_joined[:200]}"
+        else:
+            query_seed = f"{transcript} {ocr_joined}"
+            
+        docs = vector_store.similarity_search(query_seed.strip(), k=3)
+        retrieved_rules = "\n\n".join([doc.page_content for doc in docs]) if docs else "No specific regulatory rules retrieved."
+        
+        # --- PROMPT WITH STRICT SCHEMA & FEW-SHOT EXAMPLES ---
+        system_prompt = f"""
+You are an expert Enterprise Brand Compliance Auditor. Your task is to evaluate promotional video content against official regulatory compliance rules and brand advertising standards.
+
+OFFICIAL REGULATORY RULES & GUIDELINES:
+{retrieved_rules}
+
+EVALUATION CRITERIA:
+1. FTC Endorsement Guidelines (16 CFR Part 255): Material connections (paid sponsorships, free gifts) must be clearly, conspicuously disclosed both audibly and visually before or during the endorsement.
+2. Deceptive / Unsubstantiated Claims: Absolute claims (e.g. "guaranteed 100% cure", "instant miracle results") without scientific evidence or disclaimer.
+3. Ad Transparency & Disclosures: On-screen disclaimers must be legible, contrasting, and held long enough to be read.
+
+FEW-SHOT REFERENCE EXAMPLES:
+
+Example 1 (CRITICAL Violation - Missing Disclosure):
+- Transcript: "Hey guys! Today I'm trying this brand new energy drink sent to me by XYZ Labs, and it completely eliminated my fatigue!"
+- OCR: ["XYZ Energy", "Buy Now at link in bio"]
+- Audit Output:
+{{
+    "compliance_results": [
+        {{
+            "category": "FTC_DISCLOSURE",
+            "severity": "CRITICAL",
+            "description": "Creator promotes gifted product from XYZ Labs without clear audible or visual sponsorship disclosure (#ad / #sponsored).",
+            "timestamp": "00:02"
+        }}
+    ],
+    "status": "FAIL",
+    "final_report": "### Audit Summary: Non-Compliant (CRITICAL)\\n- **Violation**: Missing mandatory FTC endorsement disclosure for gifted promotional products.\\n- **Recommendation**: Add clear '#AD' overlay on screen and verbal disclosure within the first 5 seconds."
+}}
+
+Example 2 (WARNING - Ambiguous Superlative Claim):
+- Transcript: "This serum might give you the best skin of your entire life if you use it daily. #sponsored"
+- OCR: ["Sponsored by GlowCo", "*Individual results may vary"]
+- Audit Output:
+{{
+    "compliance_results": [
+        {{
+            "category": "Claim Substantiation",
+            "severity": "WARNING",
+            "description": "Exaggerated claim 'best skin of your entire life' used; legible disclaimer is present but claim borders on unsubstantiated puffery.",
+            "timestamp": "00:04"
+        }}
+    ],
+    "status": "FAIL",
+    "final_report": "### Audit Summary: Cautionary Flags (WARNING)\\n- **Violation**: Borderline unsubstantiated superlative claim.\\n- **Recommendation**: Tone down superlative claims or make disclaimer more prominent."
+}}
+
+Example 3 (PASS - Fully Compliant):
+- Transcript: "Thanks to ABC Fitness for sponsoring today's workout. As always, consult a doctor before starting any regimen."
+- OCR: ["#PaidAd - ABC Fitness", "Consult physician before starting new exercises"]
+- Audit Output:
+{{
+    "compliance_results": [],
+    "status": "PASS",
+    "final_report": "### Audit Summary: Approved (PASS)\\n- Content contains clear audible and on-screen sponsorship disclosures.\\n- Required safety disclaimers are present and compliant with advertising standards."
+}}
+
+INSTRUCTIONS:
+- Analyze the provided transcript, on-screen OCR text, and metadata.
+- Return ONLY valid JSON adhering strictly to the schema shown in the examples.
+- If any violations are found, set 'status' to 'FAIL'. If no violations are found, set 'status' to 'PASS' and 'compliance_results' to [].
+"""
+
+        user_message = f"""
+VIDEO METADATA: {state.get('video_metadata', {})}
+TRANSCRIPT: {transcript}
+ON-SCREEN TEXT (OCR): {ocr_text}
+"""
+
         response = llm.invoke([
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_message)
         ])
         
-        # --- FIX: Clean Markdown if present (```json ... ```) ---
-        content = response.content
-        if "```" in content:
-            # Regex to find JSON inside code blocks
-            content = re.search(r"```(?:json)?(.*?)```", content, re.DOTALL).group(1)
-            
-        audit_data = json.loads(content.strip())
+        raw_text = response.content if hasattr(response, "content") else str(response)
+        audit_data = _clean_and_parse_llm_json(raw_text)
         
         return {
             "compliance_results": audit_data.get("compliance_results", []),
@@ -166,9 +250,10 @@ def audit_content_node(state: VideoAuditState) -> Dict[str, Any]:
 
     except Exception as e:
         logger.error(f"System Error in Auditor Node: {str(e)}")
-        # Log the raw response to see what went wrong
-        logger.error(f"Raw LLM Response: {response.content if 'response' in locals() else 'None'}")
+        raw_content = getattr(response, "content", "None") if response is not None else "None"
+        logger.error(f"Raw LLM Response: {raw_content}")
         return {
             "errors": [str(e)],
-            "final_status": "FAIL"
+            "final_status": "FAIL",
+            "final_report": f"Audit execution failed due to an error: {str(e)}"
         }

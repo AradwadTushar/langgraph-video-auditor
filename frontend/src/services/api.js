@@ -26,13 +26,25 @@ export function parseTimestampToSeconds(ts) {
 
 export async function runVideoAudit(videoUrl) {
   try {
-    const response = await fetch('/api/audit', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ video_url: videoUrl }),
-    });
+    let response;
+    const bodyPayload = JSON.stringify({ video_url: videoUrl });
+    const headers = { 'Content-Type': 'application/json' };
+
+    try {
+      response = await fetch('/api/audit', {
+        method: 'POST',
+        headers,
+        body: bodyPayload,
+      });
+    } catch (networkErr) {
+      // Fallback directly to backend port if Vite proxy is unreachable
+      console.info('Proxy fetch failed, attempting direct connection to http://localhost:8000/audit');
+      response = await fetch('http://localhost:8000/audit', {
+        method: 'POST',
+        headers,
+        body: bodyPayload,
+      });
+    }
 
     if (!response.ok) {
       const errData = await response.json().catch(() => ({}));
